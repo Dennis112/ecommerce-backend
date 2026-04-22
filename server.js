@@ -1,22 +1,56 @@
 require("dotenv").config();
-const bodyParser = require("body-parser");
+
 const express = require("express");
 const cors = require("cors");
+const bodyParser = require("body-parser");
+const mongoose = require("mongoose");
 const Stripe = require("stripe");
 
-// ✅ ONLY THIS (no duplicates anywhere)
+const app = express();
+
+// 🔐 Stripe
 const stripe = Stripe(process.env.STRIPE_SECRET_KEY);
 
-const app = express();
+// 🔥 MongoDB connection
+mongoose.connect(process.env.MONGO_URI)
+  .then(() => console.log("✅ MongoDB connected"))
+  .catch(err => console.log("❌ DB error:", err));
+
+// 🔥 IMPORTANT ORDER
+app.use("/webhook", bodyParser.raw({ type: "application/json" }));
 app.use(cors());
 app.use(express.json());
-// ✅ Test route
+
+// ✅ TEST ROUTE
 app.get("/", (req, res) => {
-  res.send("Backend is running");
+  res.send("🚀 Backend is running");
 });
-// Needed for Stripe webhook
-app.use("/webhook", bodyParser.raw({ type: "application/json" }));
-// ✅ CREATE CHECKOUT SESSION (LIVE)
+
+// 🧱 ORDER MODEL (your “table”)
+const orderSchema = new mongoose.Schema({
+  stripeSessionId: String,
+  amount: Number,
+  status: String,
+
+  name: String,
+  email: String,
+  phone: String,
+
+  address: String,
+  city: String,
+  state: String,
+  zip: String,
+  country: String,
+
+  createdAt: {
+    type: Date,
+    default: Date.now
+  }
+});
+
+const Order = mongoose.model("Order", orderSchema);
+
+// 💳 CREATE CHECKOUT SESSION
 app.post("/create-checkout-session", async (req, res) => {
   const { cart } = req.body;
 
@@ -36,21 +70,22 @@ app.post("/create-checkout-session", async (req, res) => {
         quantity: item.quantity,
       })),
 
-      success_url: "http://127.0.0.1:5500/success.html",
-      cancel_url: "http://127.0.0.1:5500/cancel.html",
+      success_url: "https://apexstudiosltd.shop/pickup.html?session_id={CHECKOUT_SESSION_ID}",
+      cancel_url: "https://apexstudiosltd.shop/cancel.html",
     });
 
-    // 🔥 ADD THIS LINE HERE
-    console.log("SESSION CREATED:", session.id);
+    console.log("🟢 SESSION CREATED:", session.id);
 
     res.json({ id: session.id });
 
   } catch (error) {
-    console.error("STRIPE ERROR:", error.message);
+    console.error("❌ STRIPE ERROR:", error.message);
     res.status(500).json({ error: error.message });
   }
 });
-app.post("/webhook", (req, res) => {
+
+// 💰 WEBHOOK (SAVE PAYMENT)
+app.post("/webhook", async (req, res) => {
   const sig = req.headers["stripe-signature"];
 
   let event;
@@ -62,30 +97,45 @@ app.post("/webhook", (req, res) => {
       process.env.STRIPE_WEBHOOK_SECRET
     );
   } catch (err) {
-    console.log("❌ Webhook signature verification failed.", err.message);
+    console.log("❌ Webhook error:", err.message);
     return res.sendStatus(400);
   }
 
-  // ✅ Handle successful payment
   if (event.type === "checkout.session.completed") {
     const session = event.data.object;
 
     console.log("💰 PAYMENT SUCCESS:", session.id);
 
-    // 👉 HERE you save order to database (or array)
-    const order = {
-      id: Date.now(),
+    await Order.create({
       stripeSessionId: session.id,
       amount: session.amount_total / 100,
       status: "paid"
-    };
-
-    console.log("📦 ORDER SAVED:", order);
+    });
   }
 
   res.json({ received: true });
 });
-// ✅ Start server
-app.listen(5000, () => {
-  console.log("🚀 Server running on port 5000");
+
+// 📦 SAVE PICKUP DETAILS
+app.post("/save-order-details", async (req, res) => {
+  const { name, email, phone, address, city, state, zip, country, sessionId } = req.body;
+
+  try {
+    await Order.findOneAndUpdate(
+      { stripeSessionId: sessionId },
+      { name, email, phone, address, city, state, zip, country }
+    );
+
+    res.json({ message: "✅ Details saved" });
+
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// 🚀 START SERVER
+const PORT = process.env.PORT || 5000;
+
+app.listen(PORT, () => {
+  console.log(`🚀 Server running on port ${PORT}`);
 });
